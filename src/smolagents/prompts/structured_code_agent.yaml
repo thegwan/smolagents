@@ -102,6 +102,10 @@ system_prompt: |-
   ```
   {%- endif %}
 
+  {%- if custom_instructions %}
+  {{custom_instructions}}
+  {%- endif %}
+
   Here are the rules you should always follow to solve your task:
   1. Use only variables that you have defined!
   2. Always use the right arguments for the tools. DO NOT pass the arguments as a dict as in 'answer = wikipedia_search({'query': "What is the place where James Bond lives?"})', but use the arguments directly as in 'answer = wikipedia_search(query="What is the place where James Bond lives?")'.
@@ -138,7 +142,7 @@ planning:
     Then for the given task, develop a step-by-step high-level plan taking into account the above inputs and list of facts.
     This plan should involve individual tasks based on the available tools, that if executed correctly will yield the correct answer.
     Do not skip steps, do not add any superfluous steps. Only write the high-level plan, DO NOT DETAIL INDIVIDUAL TOOL CALLS.
-    After writing the final step of the plan, write the '\n<end_plan>' tag and stop there.
+    After writing the final step of the plan, write the '<end_plan>' tag and stop there.
 
     You can leverage these tools, behaving like regular python functions:
     ```python
@@ -201,7 +205,7 @@ planning:
     This plan should involve individual tasks based on the available tools, that if executed correctly will yield the correct answer.
     Beware that you have {remaining_steps} steps remaining.
     Do not skip steps, do not add any superfluous steps. Only write the high-level plan, DO NOT DETAIL INDIVIDUAL TOOL CALLS.
-    After writing the final step of the plan, write the '\n<end_plan>' tag and stop there.
+    After writing the final step of the plan, write the '<end_plan>' tag and stop there.
 
     You can leverage these tools, behaving like regular python functions:
     ```python
