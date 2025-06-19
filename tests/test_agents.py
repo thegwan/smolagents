@@ -612,12 +612,26 @@ nested_answer()
         assert step_memory_dict["timing"]["duration"] > 0.1
 
     def test_final_answer_checks(self):
+        error_string = "failed with error"
+
         def check_always_fails(final_answer, agent_memory):
             assert False, "Error raised in check"
 
         agent = CodeAgent(model=FakeCodeModel(), tools=[], final_answer_checks=[check_always_fails])
         agent.run("Dummy task.")
+        assert error_string in str(agent.write_memory_to_messages())
         assert "Error raised in check" in str(agent.write_memory_to_messages())
+
+        agent = CodeAgent(
+            model=FakeCodeModel(),
+            tools=[],
+            final_answer_checks=[lambda x, y: x == 7.2904],
+            verbosity_level=1000,
+        )
+        output = agent.run("Dummy task.")
+        assert output == 7.2904  # Check that output is correct
+        assert len([step for step in agent.memory.steps if isinstance(step, ActionStep)]) == 2
+        assert error_string not in str(agent.write_memory_to_messages())
 
     def test_generation_errors_are_raised(self):
         class FakeCodeModel(Model):
@@ -640,19 +654,21 @@ nested_answer()
         agent.memory.steps.append(previous_step)
 
         # Run the agent
-        agent.run(task, reset=False)
+        agent.run(task, reset=False, max_steps=2)
 
         # Verify that the planning step used update plan prompts
         planning_steps = [step for step in agent.memory.steps if isinstance(step, PlanningStep)]
         assert len(planning_steps) > 0
 
         # Check that the planning step's model input messages contain the injected memory
-        planning_step = planning_steps[0]
-        assert len(planning_step.model_input_messages) == 3  # system message + memory messages + user message
-        assert planning_step.model_input_messages[0]["role"] == "system"
-        assert task in planning_step.model_input_messages[0]["content"][0]["text"]
-        assert planning_step.model_input_messages[1]["role"] == "user"
-        assert "Previous user request" in planning_step.model_input_messages[1]["content"][0]["text"]
+        update_plan_step = planning_steps[0]
+        assert (
+            len(update_plan_step.model_input_messages) == 3
+        )  # system message + memory messages (1 task message, the latest one is removed) + user message
+        assert update_plan_step.model_input_messages[0]["role"] == "system"
+        assert task in update_plan_step.model_input_messages[0]["content"][0]["text"]
+        assert update_plan_step.model_input_messages[1]["role"] == "user"
+        assert "Previous user request" in update_plan_step.model_input_messages[1]["content"][0]["text"]
 
 
 class CustomFinalAnswerTool(FinalAnswerTool):

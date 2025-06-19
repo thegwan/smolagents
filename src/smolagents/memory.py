@@ -61,20 +61,25 @@ class ActionStep(MemoryStep):
     observations_images: list["PIL.Image.Image"] | None = None
     action_output: Any = None
     token_usage: TokenUsage | None = None
+    is_final_answer: bool = False
 
     def dict(self):
         # We overwrite the method to parse the tool_calls and action_output manually
         return {
+            "step_number": self.step_number,
+            "timing": self.timing.dict(),
             "model_input_messages": self.model_input_messages,
             "tool_calls": [tc.dict() for tc in self.tool_calls] if self.tool_calls else [],
-            "timing": self.timing.dict(),
-            "token_usage": asdict(self.token_usage) if self.token_usage else None,
-            "step": self.step_number,
             "error": self.error.dict() if self.error else None,
             "model_output_message": self.model_output_message.dict() if self.model_output_message else None,
             "model_output": self.model_output,
             "observations": self.observations,
+            "observations_images": [image.tobytes() for image in self.observations_images]
+            if self.observations_images
+            else None,
             "action_output": make_json_serializable(self.action_output),
+            "token_usage": asdict(self.token_usage) if self.token_usage else None,
+            "is_final_answer": self.is_final_answer,
         }
 
     def to_messages(self, summary_mode: bool = False) -> list[Message]:
