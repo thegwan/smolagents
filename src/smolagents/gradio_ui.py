@@ -22,7 +22,7 @@ from typing import Generator
 from smolagents.agent_types import AgentAudio, AgentImage, AgentText
 from smolagents.agents import MultiStepAgent, PlanningStep
 from smolagents.memory import ActionStep, FinalAnswerStep
-from smolagents.models import ChatMessageStreamDelta
+from smolagents.models import ChatMessageStreamDelta, agglomerate_stream_deltas
 from smolagents.utils import _is_package_available
 
 
@@ -249,26 +249,27 @@ def stream_to_gradio(
     additional_args: dict | None = None,
 ) -> Generator:
     """Runs an agent with the given task and streams the messages from the agent as gradio ChatMessages."""
+
     if not _is_package_available("gradio"):
         raise ModuleNotFoundError(
             "Please install 'gradio' extra to use the GradioUI: `pip install 'smolagents[gradio]'`"
         )
-    intermediate_text = ""
-
+    accumulated_events: list[ChatMessageStreamDelta] = []
     for event in agent.run(
         task, images=task_images, stream=True, reset=reset_agent_memory, additional_args=additional_args
     ):
         if isinstance(event, ActionStep | PlanningStep | FinalAnswerStep):
-            intermediate_text = ""
             for message in pull_messages_from_step(
                 event,
                 # If we're streaming model outputs, no need to display them twice
                 skip_model_outputs=getattr(agent, "stream_outputs", False),
             ):
                 yield message
+            accumulated_events = []
         elif isinstance(event, ChatMessageStreamDelta):
-            intermediate_text += event.content or ""
-            yield intermediate_text
+            accumulated_events.append(event)
+            text = agglomerate_stream_deltas(accumulated_events).render_as_markdown()
+            yield text
 
 
 class GradioUI:

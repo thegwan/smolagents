@@ -42,6 +42,7 @@ from smolagents.agents import (
     MultiStepAgent,
     ToolCall,
     ToolCallingAgent,
+    ToolOutput,
     populate_template,
 )
 from smolagents.default_tools import DuckDuckGoSearchTool, FinalAnswerTool, PythonInterpreterTool, VisitWebpageTool
@@ -53,7 +54,7 @@ from smolagents.memory import (
 from smolagents.models import (
     ChatMessage,
     ChatMessageToolCall,
-    ChatMessageToolCallDefinition,
+    ChatMessageToolCallFunction,
     InferenceClientModel,
     MessageRole,
     Model,
@@ -115,7 +116,7 @@ class FakeToolCallModel(Model):
                     ChatMessageToolCall(
                         id="call_0",
                         type="function",
-                        function=ChatMessageToolCallDefinition(
+                        function=ChatMessageToolCallFunction(
                             name="python_interpreter", arguments={"code": "2*3.6452"}
                         ),
                     )
@@ -129,7 +130,7 @@ class FakeToolCallModel(Model):
                     ChatMessageToolCall(
                         id="call_1",
                         type="function",
-                        function=ChatMessageToolCallDefinition(name="final_answer", arguments={"answer": "7.2904"}),
+                        function=ChatMessageToolCallFunction(name="final_answer", arguments={"answer": "7.2904"}),
                     )
                 ],
             )
@@ -145,7 +146,7 @@ class FakeToolCallModelImage(Model):
                     ChatMessageToolCall(
                         id="call_0",
                         type="function",
-                        function=ChatMessageToolCallDefinition(
+                        function=ChatMessageToolCallFunction(
                             name="fake_image_generation_tool",
                             arguments={"prompt": "An image of a cat"},
                         ),
@@ -160,7 +161,7 @@ class FakeToolCallModelImage(Model):
                     ChatMessageToolCall(
                         id="call_1",
                         type="function",
-                        function=ChatMessageToolCallDefinition(name="final_answer", arguments="image.png"),
+                        function=ChatMessageToolCallFunction(name="final_answer", arguments="image.png"),
                     )
                 ],
             )
@@ -176,7 +177,7 @@ class FakeToolCallModelVL(Model):
                     ChatMessageToolCall(
                         id="call_0",
                         type="function",
-                        function=ChatMessageToolCallDefinition(
+                        function=ChatMessageToolCallFunction(
                             name="fake_image_understanding_tool",
                             arguments={
                                 "prompt": "What is in this image?",
@@ -194,7 +195,7 @@ class FakeToolCallModelVL(Model):
                     ChatMessageToolCall(
                         id="call_1",
                         type="function",
-                        function=ChatMessageToolCallDefinition(name="final_answer", arguments="The image is a cat."),
+                        function=ChatMessageToolCallFunction(name="final_answer", arguments="The image is a cat."),
                     )
                 ],
             )
@@ -665,10 +666,10 @@ nested_answer()
         assert (
             len(update_plan_step.model_input_messages) == 3
         )  # system message + memory messages (1 task message, the latest one is removed) + user message
-        assert update_plan_step.model_input_messages[0]["role"] == "system"
-        assert task in update_plan_step.model_input_messages[0]["content"][0]["text"]
-        assert update_plan_step.model_input_messages[1]["role"] == "user"
-        assert "Previous user request" in update_plan_step.model_input_messages[1]["content"][0]["text"]
+        assert update_plan_step.model_input_messages[0].role == "system"
+        assert task in update_plan_step.model_input_messages[0].content[0]["text"]
+        assert update_plan_step.model_input_messages[1].role == "user"
+        assert "Previous user request" in update_plan_step.model_input_messages[1].content[0]["text"]
 
 
 class CustomFinalAnswerTool(FinalAnswerTool):
@@ -820,18 +821,25 @@ class TestMultiStepAgent:
             (
                 1,
                 [
-                    [{"role": MessageRole.USER, "content": [{"type": "text", "text": "INITIAL_PLAN_USER_PROMPT"}]}],
+                    [
+                        ChatMessage(
+                            role=MessageRole.USER, content=[{"type": "text", "text": "INITIAL_PLAN_USER_PROMPT"}]
+                        ),
+                    ],
                 ],
             ),
             (
                 2,
                 [
                     [
-                        {
-                            "role": MessageRole.SYSTEM,
-                            "content": [{"type": "text", "text": "UPDATE_PLAN_SYSTEM_PROMPT"}],
-                        },
-                        {"role": MessageRole.USER, "content": [{"type": "text", "text": "UPDATE_PLAN_USER_PROMPT"}]},
+                        ChatMessage(
+                            role=MessageRole.SYSTEM,
+                            content=[{"type": "text", "text": "UPDATE_PLAN_SYSTEM_PROMPT"}],
+                        ),
+                        ChatMessage(
+                            role=MessageRole.USER,
+                            content=[{"type": "text", "text": "UPDATE_PLAN_USER_PROMPT"}],
+                        ),
                     ],
                 ],
             ),
@@ -872,22 +880,18 @@ class TestMultiStepAgent:
         }
         for expected_messages in expected_messages_list:
             for expected_message in expected_messages:
-                for expected_content in expected_message["content"]:
-                    expected_content["text"] = expected_message_texts[expected_content["text"]]
+                expected_message.content[0]["text"] = expected_message_texts[expected_message.content[0]["text"]]
         assert isinstance(planning_step, PlanningStep)
         expected_model_input_messages = expected_messages_list[0]
         model_input_messages = planning_step.model_input_messages
         assert isinstance(model_input_messages, list)
         assert len(model_input_messages) == len(expected_model_input_messages)  # 2
         for message, expected_message in zip(model_input_messages, expected_model_input_messages):
-            assert isinstance(message, dict)
-            assert "role" in message
-            assert "content" in message
-            assert message["role"] in MessageRole.__members__.values()
-            assert message["role"] == expected_message["role"]
-            assert isinstance(message["content"], list)
-            assert len(message["content"]) == 1
-            for content, expected_content in zip(message["content"], expected_message["content"]):
+            assert isinstance(message, ChatMessage)
+            assert message.role in MessageRole.__members__.values()
+            assert message.role == expected_message.role
+            assert isinstance(message.content, list)
+            for content, expected_content in zip(message.content, expected_message.content):
                 assert content == expected_content
         # Test calls to model
         assert len(fake_model.generate.call_args_list) == 1
@@ -897,14 +901,11 @@ class TestMultiStepAgent:
             assert isinstance(messages, list)
             assert len(messages) == len(expected_messages)
             for message, expected_message in zip(messages, expected_messages):
-                assert isinstance(message, dict)
-                assert "role" in message
-                assert "content" in message
-                assert message["role"] in MessageRole.__members__.values()
-                assert message["role"] == expected_message["role"]
-                assert isinstance(message["content"], list)
-                assert len(message["content"]) == 1
-                for content, expected_content in zip(message["content"], expected_message["content"]):
+                assert isinstance(message, ChatMessage)
+                assert message.role in MessageRole.__members__.values()
+                assert message.role == expected_message.role
+                assert isinstance(message.content, list)
+                for content, expected_content in zip(message.content, expected_message.content):
                     assert content == expected_content
 
     @pytest.mark.parametrize(
@@ -914,11 +915,14 @@ class TestMultiStepAgent:
                 None,
                 [
                     [
-                        {
-                            "role": MessageRole.SYSTEM,
-                            "content": [{"type": "text", "text": "FINAL_ANSWER_SYSTEM_PROMPT"}],
-                        },
-                        {"role": MessageRole.USER, "content": [{"type": "text", "text": "FINAL_ANSWER_USER_PROMPT"}]},
+                        ChatMessage(
+                            role=MessageRole.SYSTEM,
+                            content=[{"type": "text", "text": "FINAL_ANSWER_SYSTEM_PROMPT"}],
+                        ),
+                        ChatMessage(
+                            role=MessageRole.USER,
+                            content=[{"type": "text", "text": "FINAL_ANSWER_USER_PROMPT"}],
+                        ),
                     ]
                 ],
             ),
@@ -926,11 +930,17 @@ class TestMultiStepAgent:
                 ["image1.png"],
                 [
                     [
-                        {
-                            "role": MessageRole.SYSTEM,
-                            "content": [{"type": "text", "text": "FINAL_ANSWER_SYSTEM_PROMPT"}, {"type": "image"}],
-                        },
-                        {"role": MessageRole.USER, "content": [{"type": "text", "text": "FINAL_ANSWER_USER_PROMPT"}]},
+                        ChatMessage(
+                            role=MessageRole.SYSTEM,
+                            content=[
+                                {"type": "text", "text": "FINAL_ANSWER_SYSTEM_PROMPT"},
+                                {"type": "image", "image": "image1.png"},
+                            ],
+                        ),
+                        ChatMessage(
+                            role=MessageRole.USER,
+                            content=[{"type": "text", "text": "FINAL_ANSWER_USER_PROMPT"}],
+                        ),
                     ]
                 ],
             ),
@@ -959,7 +969,7 @@ class TestMultiStepAgent:
         }
         for expected_messages in expected_messages_list:
             for expected_message in expected_messages:
-                for expected_content in expected_message["content"]:
+                for expected_content in expected_message.content:
                     if "text" in expected_content:
                         expected_content["text"] = expected_message_texts[expected_content["text"]]
         assert final_answer == "Final answer."
@@ -971,14 +981,11 @@ class TestMultiStepAgent:
             assert isinstance(messages, list)
             assert len(messages) == len(expected_messages)
             for message, expected_message in zip(messages, expected_messages):
-                assert isinstance(message, dict)
-                assert "role" in message
-                assert "content" in message
-                assert message["role"] in MessageRole.__members__.values()
-                assert message["role"] == expected_message["role"]
-                assert isinstance(message["content"], list)
-                assert len(message["content"]) == len(expected_message["content"])
-                for content, expected_content in zip(message["content"], expected_message["content"]):
+                assert isinstance(message, ChatMessage)
+                assert message.role in MessageRole.__members__.values()
+                assert message.role == expected_message.role
+                assert isinstance(message.content, list)
+                for content, expected_content in zip(message.content, expected_message.content):
                     assert content == expected_content
 
     def test_interrupt(self):
@@ -1114,7 +1121,7 @@ class TestToolCallingAgent:
                 ChatMessageToolCall(
                     id="call_0",
                     type="function",
-                    function=ChatMessageToolCallDefinition(name="test_tool", arguments={"input": "test_value"}),
+                    function=ChatMessageToolCallFunction(name="test_tool", arguments={"input": "test_value"}),
                 )
             ],
         )
@@ -1259,7 +1266,7 @@ class TestToolCallingAgent:
 
         model = OpenAIServerModel(model_id="fakemodel")
 
-        agent = ToolCallingAgent(model=model, tools=[], max_steps=1, stream_outputs=True)
+        agent = ToolCallingAgent(model=model, tools=[], max_steps=1, stream_outputs=True, verbosity_level=100)
         result = agent.run("Make 2 calls to final answer: return both 'output1' and 'output2'")
         assert len(agent.memory.steps[-1].model_output_message.tool_calls) == 2
         assert agent.memory.steps[-1].model_output_message.tool_calls[0].function.name == "final_answer"
@@ -1336,7 +1343,7 @@ class TestToolCallingAgent:
                 ChatMessageToolCall(
                     id="call_0",
                     type="function",
-                    function=ChatMessageToolCallDefinition(
+                    function=ChatMessageToolCallFunction(
                         name="final_answer", arguments={"answer1": "1", "answer2": "2"}
                     ),
                 )
@@ -1355,7 +1362,7 @@ class TestToolCallingAgent:
                     ChatMessageToolCall(
                         id="call_1",
                         type="function",
-                        function=ChatMessageToolCallDefinition(name="test_tool", arguments={"input": "test_value"}),
+                        function=ChatMessageToolCallFunction(name="test_tool", arguments={"input": "test_value"}),
                     )
                 ],
                 "expected_model_output": "Called Tool: 'test_tool' with arguments: {'input': 'test_value'}",
@@ -1369,12 +1376,12 @@ class TestToolCallingAgent:
                     ChatMessageToolCall(
                         id="call_1",
                         type="function",
-                        function=ChatMessageToolCallDefinition(name="test_tool", arguments={"input": "value1"}),
+                        function=ChatMessageToolCallFunction(name="test_tool", arguments={"input": "value1"}),
                     ),
                     ChatMessageToolCall(
                         id="call_2",
                         type="function",
-                        function=ChatMessageToolCallDefinition(name="test_tool", arguments={"input": "value2"}),
+                        function=ChatMessageToolCallFunction(name="test_tool", arguments={"input": "value2"}),
                     ),
                 ],
                 "expected_model_output": "Called Tool: 'test_tool' with arguments: {'input': 'value1'}\nCalled Tool: 'test_tool' with arguments: {'input': 'value2'}",
@@ -1388,7 +1395,7 @@ class TestToolCallingAgent:
                     ChatMessageToolCall(
                         id="call_1",
                         type="function",
-                        function=ChatMessageToolCallDefinition(name="nonexistent_tool", arguments={"input": "test"}),
+                        function=ChatMessageToolCallFunction(name="nonexistent_tool", arguments={"input": "test"}),
                     )
                 ],
                 "expected_error": AgentToolExecutionError,
@@ -1399,7 +1406,7 @@ class TestToolCallingAgent:
                     ChatMessageToolCall(
                         id="call_1",
                         type="function",
-                        function=ChatMessageToolCallDefinition(name="test_tool", arguments={"input": "error"}),
+                        function=ChatMessageToolCallFunction(name="test_tool", arguments={"input": "error"}),
                     )
                 ],
                 "expected_error": AgentToolExecutionError,
@@ -1418,7 +1425,7 @@ class TestToolCallingAgent:
                     ChatMessageToolCall(
                         id="call_1",
                         type="function",
-                        function=ChatMessageToolCallDefinition(
+                        function=ChatMessageToolCallFunction(
                             name="final_answer", arguments={"answer": "This is the final answer"}
                         ),
                     )
@@ -1434,7 +1441,7 @@ class TestToolCallingAgent:
                     ChatMessageToolCall(
                         id="call_1",
                         type="function",
-                        function=ChatMessageToolCallDefinition(name="test_tool", arguments={"wrong_param": "value"}),
+                        function=ChatMessageToolCallFunction(name="test_tool", arguments={"wrong_param": "value"}),
                     )
                 ],
                 "expected_error": AgentToolCallError,
@@ -1457,7 +1464,9 @@ class TestToolCallingAgent:
             final_outputs = list(agent.process_tool_calls(chat_message, memory_step))
             assert memory_step.model_output == test_case["expected_model_output"]
             assert memory_step.observations == test_case["expected_observations"]
-            assert [final_output.output for final_output in final_outputs] == test_case["expected_final_outputs"]
+            assert [
+                final_output.output for final_output in final_outputs if isinstance(final_output, ToolOutput)
+            ] == test_case["expected_final_outputs"]
             # Verify memory step tool calls were updated correctly
             if test_case["tool_calls"]:
                 assert memory_step.tool_calls == [
@@ -1826,7 +1835,7 @@ class TestMultiAgents:
                                 ChatMessageToolCall(
                                     id="call_0",
                                     type="function",
-                                    function=ChatMessageToolCallDefinition(
+                                    function=ChatMessageToolCallFunction(
                                         name="search_agent",
                                         arguments="Who is the current US president?",
                                     ),
@@ -1842,7 +1851,7 @@ class TestMultiAgents:
                                 ChatMessageToolCall(
                                     id="call_0",
                                     type="function",
-                                    function=ChatMessageToolCallDefinition(
+                                    function=ChatMessageToolCallFunction(
                                         name="final_answer", arguments="Final report."
                                     ),
                                 )
@@ -1889,7 +1898,7 @@ final_answer("Final report.")
                         ChatMessageToolCall(
                             id="call_0",
                             type="function",
-                            function=ChatMessageToolCallDefinition(
+                            function=ChatMessageToolCallFunction(
                                 name="final_answer",
                                 arguments="Report on the current US president",
                             ),

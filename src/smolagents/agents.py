@@ -29,7 +29,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from logging import getLogger
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, TypedDict
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias, TypedDict, Union
 
 import jinja2
 import yaml
@@ -53,7 +53,6 @@ from .memory import (
     ActionStep,
     AgentMemory,
     FinalAnswerStep,
-    Message,
     PlanningStep,
     SystemPromptStep,
     TaskStep,
@@ -65,8 +64,10 @@ from .models import (
     CODEAGENT_RESPONSE_FORMAT,
     ChatMessage,
     ChatMessageStreamDelta,
+    ChatMessageToolCall,
     MessageRole,
     Model,
+    agglomerate_stream_deltas,
     parse_json_if_needed,
 )
 from .monitoring import (
@@ -111,6 +112,12 @@ def populate_template(template: str, variables: dict[str, Any]) -> str:
 
 @dataclass
 class ActionOutput:
+    output: Any
+    is_final_answer: bool
+
+
+@dataclass
+class ToolOutput:
     output: Any
     is_final_answer: bool
 
@@ -202,6 +209,17 @@ class RunResult:
     messages: list[dict]
     token_usage: TokenUsage | None
     timing: Timing
+
+
+StreamEvent: TypeAlias = Union[
+    ChatMessageStreamDelta,
+    ChatMessageToolCall,
+    ActionOutput,
+    ToolOutput,
+    PlanningStep,
+    ActionStep,
+    FinalAnswerStep,
+]
 
 
 class MultiStepAgent(ABC):
@@ -492,10 +510,10 @@ You have been provided with these additional arguments, that you can access usin
             try:
                 for output in self._step_stream(action_step):
                     # Yield streaming deltas
-                    if not isinstance(output, ActionOutput):
+                    if not isinstance(output, (ActionOutput, ToolOutput)):
                         yield output
 
-                    if isinstance(output, ActionOutput) and output.is_final_answer:
+                    if isinstance(output, (ActionOutput, ToolOutput)) and output.is_final_answer:
                         if self.final_answer_checks:
                             self._validate_final_answer(output.output)
                         returned_final_answer = True
@@ -553,9 +571,9 @@ You have been provided with these additional arguments, that you can access usin
         start_time = time.time()
         if is_first_step:
             input_messages = [
-                {
-                    "role": MessageRole.USER,
-                    "content": [
+                ChatMessage(
+                    role=MessageRole.USER,
+                    content=[
                         {
                             "type": "text",
                             "text": populate_template(
@@ -564,7 +582,7 @@ You have been provided with these additional arguments, that you can access usin
                             ),
                         }
                     ],
-                }
+                )
             ]
             if self.stream_outputs and hasattr(self.model, "generate_stream"):
                 plan_message_content = ""
@@ -583,8 +601,12 @@ You have been provided with these additional arguments, that you can access usin
                 plan_message = self.model.generate(input_messages, stop_sequences=["<end_plan>"])
                 plan_message_content = plan_message.content
                 input_tokens, output_tokens = (
-                    plan_message.token_usage.input_tokens,
-                    plan_message.token_usage.output_tokens,
+                    (
+                        plan_message.token_usage.input_tokens,
+                        plan_message.token_usage.output_tokens,
+                    )
+                    if plan_message.token_usage
+                    else (None, None)
                 )
             plan = textwrap.dedent(
                 f"""Here are the facts I know and the plan of action that I will follow to solve the task:\n```\n{plan_message_content}\n```"""
@@ -593,9 +615,9 @@ You have been provided with these additional arguments, that you can access usin
             # Summary mode removes the system prompt and previous planning messages output by the model.
             # Removing previous planning messages avoids influencing too much the new plan.
             memory_messages = self.write_memory_to_messages(summary_mode=True)
-            plan_update_pre = {
-                "role": MessageRole.SYSTEM,
-                "content": [
+            plan_update_pre = ChatMessage(
+                role=MessageRole.SYSTEM,
+                content=[
                     {
                         "type": "text",
                         "text": populate_template(
@@ -603,10 +625,10 @@ You have been provided with these additional arguments, that you can access usin
                         ),
                     }
                 ],
-            }
-            plan_update_post = {
-                "role": MessageRole.USER,
-                "content": [
+            )
+            plan_update_post = ChatMessage(
+                role=MessageRole.USER,
+                content=[
                     {
                         "type": "text",
                         "text": populate_template(
@@ -620,7 +642,7 @@ You have been provided with these additional arguments, that you can access usin
                         ),
                     }
                 ],
-            }
+            )
             # remove last message from memory_messages because it is the current task
             input_messages = [plan_update_pre] + memory_messages[:-1] + [plan_update_post]
             if self.stream_outputs and hasattr(self.model, "generate_stream"):
@@ -641,10 +663,11 @@ You have been provided with these additional arguments, that you can access usin
             else:
                 plan_message = self.model.generate(input_messages, stop_sequences=["<end_plan>"])
                 plan_message_content = plan_message.content
-                input_tokens, output_tokens = (
-                    plan_message.token_usage.input_tokens,
-                    plan_message.token_usage.output_tokens,
-                )
+                if plan_message.token_usage is not None:
+                    input_tokens, output_tokens = (
+                        plan_message.token_usage.input_tokens,
+                        plan_message.token_usage.output_tokens,
+                    )
             plan = textwrap.dedent(
                 f"""I still need to solve the task I was given:\n```\n{self.task}\n```\n\nHere are the facts I know and my new/updated plan of action to solve the task:\n```\n{plan_message_content}\n```"""
             )
@@ -677,7 +700,7 @@ You have been provided with these additional arguments, that you can access usin
     def write_memory_to_messages(
         self,
         summary_mode: bool = False,
-    ) -> list[Message]:
+    ) -> list[ChatMessage]:
         """
         Reads past llm_outputs, actions, and observations or errors from the memory into a series of messages
         that can be used as input to the LLM. Adds a number of keywords (such as PLAN, error, etc) to help
@@ -688,7 +711,7 @@ You have been provided with these additional arguments, that you can access usin
             messages.extend(memory_step.to_messages(summary_mode=summary_mode))
         return messages
 
-    def _step_stream(self, memory_step: ActionStep) -> Generator[ChatMessageStreamDelta | ActionOutput]:
+    def _step_stream(self, memory_step: ActionStep) -> Generator[ChatMessageStreamDelta | ActionOutput | ToolOutput]:
         """
         Perform one step in the ReAct framework: the agent thinks, acts, and observes the result.
         Yields ChatMessageStreamDelta during the run if streaming is enabled.
@@ -736,23 +759,23 @@ You have been provided with these additional arguments, that you can access usin
             `str`: Final answer to the task.
         """
         messages = [
-            {
-                "role": MessageRole.SYSTEM,
-                "content": [
+            ChatMessage(
+                role=MessageRole.SYSTEM,
+                content=[
                     {
                         "type": "text",
                         "text": self.prompt_templates["final_answer"]["pre_messages"],
                     }
                 ],
-            }
+            )
         ]
         if images:
-            messages[0]["content"].append({"type": "image"})
+            messages[0].content += [{"type": "image", "image": image} for image in images]
         messages += self.write_memory_to_messages()[1:]
-        messages += [
-            {
-                "role": MessageRole.USER,
-                "content": [
+        messages.append(
+            ChatMessage(
+                role=MessageRole.USER,
+                content=[
                     {
                         "type": "text",
                         "text": populate_template(
@@ -760,13 +783,13 @@ You have been provided with these additional arguments, that you can access usin
                         ),
                     }
                 ],
-            }
-        ]
+            )
+        )
         try:
             chat_message: ChatMessage = self.model.generate(messages)
             return chat_message
         except Exception as e:
-            return f"Error in generating final LLM output:\n{e}"
+            return ChatMessage(role=MessageRole.ASSISTANT, content=f"Error in generating final LLM output:\n{e}")
 
     def visualize(self):
         """Creates a rich tree visualization of the agent's structure."""
@@ -1210,7 +1233,7 @@ class ToolCallingAgent(MultiStepAgent):
         )
         return system_prompt
 
-    def _step_stream(self, memory_step: ActionStep) -> Generator[ChatMessageStreamDelta | ActionOutput]:
+    def _step_stream(self, memory_step: ActionStep) -> Generator[ChatMessageStreamDelta | ToolOutput]:
         """
         Perform one step in the ReAct framework: the agent thinks, acts, and observes the result.
         Yields ChatMessageStreamDelta during the run if streaming is enabled.
@@ -1231,34 +1254,15 @@ class ToolCallingAgent(MultiStepAgent):
                     tools_to_call_from=self.tools_and_managed_agents,
                 )
 
-                model_output = ""
-                input_tokens, output_tokens = 0, 0
-                tool_calls = {}
-
+                chat_message_stream_deltas: list[ChatMessageStreamDelta] = []
                 with Live("", console=self.logger.console, vertical_overflow="visible") as live:
                     for event in output_stream:
-                        if event.content is not None:
-                            model_output += event.content
-                            if event.token_usage:
-                                output_tokens += event.token_usage.output_tokens
-                                input_tokens = event.token_usage.input_tokens
-                        if event.tool_calls:
-                            tool_calls.update({tool_call.id: tool_call for tool_call in event.tool_calls})
-                        # Propagate the streaming delta
+                        chat_message_stream_deltas.append(event)
                         live.update(
-                            Markdown(model_output + "\n".join([str(tool_call) for tool_call in tool_calls.values()]))
+                            Markdown(agglomerate_stream_deltas(chat_message_stream_deltas).render_as_markdown())
                         )
                         yield event
-
-                chat_message = ChatMessage(
-                    role=MessageRole.ASSISTANT,
-                    content=model_output,
-                    token_usage=TokenUsage(
-                        input_tokens=input_tokens,
-                        output_tokens=output_tokens,
-                    ),
-                    tool_calls=list(tool_calls.values()),
-                )
+                chat_message = agglomerate_stream_deltas(chat_message_stream_deltas)
             else:
                 chat_message: ChatMessage = self.model.generate(
                     input_messages,
@@ -1266,16 +1270,15 @@ class ToolCallingAgent(MultiStepAgent):
                     tools_to_call_from=self.tools_and_managed_agents,
                 )
 
-                model_output = chat_message.content
                 self.logger.log_markdown(
-                    content=model_output if model_output else str(chat_message.raw),
+                    content=chat_message.content if chat_message.content else str(chat_message.raw),
                     title="Output message of the LLM:",
                     level=LogLevel.DEBUG,
                 )
 
             # Record model output
             memory_step.model_output_message = chat_message
-            memory_step.model_output = model_output
+            memory_step.model_output = chat_message.content
             memory_step.token_usage = chat_message.token_usage
         except Exception as e:
             raise AgentGenerationError(f"Error while generating output:\n{e}", self.logger) from e
@@ -1290,7 +1293,7 @@ class ToolCallingAgent(MultiStepAgent):
                 tool_call.function.arguments = parse_json_if_needed(tool_call.function.arguments)
         yield from self.process_tool_calls(chat_message, memory_step)
 
-    def process_tool_calls(self, chat_message: ChatMessage, memory_step: ActionStep):
+    def process_tool_calls(self, chat_message: ChatMessage, memory_step: ActionStep) -> Generator[StreamEvent]:
         """Process tool calls from the model output and update agent memory.
 
         Args:
@@ -1308,6 +1311,7 @@ class ToolCallingAgent(MultiStepAgent):
         parallel_calls = []
         assert chat_message.tool_calls is not None
         for tool_call in chat_message.tool_calls:
+            yield tool_call
             tool_name = tool_call.function.name
             tool_arguments = tool_call.function.arguments
             model_outputs.append(str(f"Called Tool: '{tool_name}' with arguments: {tool_arguments}"))
@@ -1351,14 +1355,14 @@ class ToolCallingAgent(MultiStepAgent):
             if len(parallel_calls) == 1:
                 # If there's only one call, process it directly
                 observations.append(process_single_tool_call(parallel_calls[0]))
-                yield ActionOutput(output=None, is_final_answer=False)
+                yield ToolOutput(output=None, is_final_answer=False)
             else:
                 # If multiple tool calls, process them in parallel
                 with ThreadPoolExecutor(self.max_tool_threads) as executor:
                     futures = [executor.submit(process_single_tool_call, call_info) for call_info in parallel_calls]
                     for future in as_completed(futures):
                         observations.append(future.result())
-                        yield ActionOutput(output=None, is_final_answer=False)
+                        yield ToolOutput(output=None, is_final_answer=False)
 
         # Process final_answer call if present
         if final_answer_call:
@@ -1388,7 +1392,7 @@ class ToolCallingAgent(MultiStepAgent):
                     level=LogLevel.INFO,
                 )
             memory_step.action_output = final_answer
-            yield ActionOutput(output=final_answer, is_final_answer=True)
+            yield ToolOutput(output=final_answer, is_final_answer=True)
 
         # Update memory step with all results
         if model_outputs:
@@ -1603,24 +1607,15 @@ class CodeAgent(MultiStepAgent):
                     stop_sequences=["<end_code>", "Observation:", "Calling tools:"],
                     **additional_args,
                 )
-                output_text = ""
-                input_tokens, output_tokens = 0, 0
+                chat_message_stream_deltas: list[ChatMessageStreamDelta] = []
                 with Live("", console=self.logger.console, vertical_overflow="visible") as live:
                     for event in output_stream:
-                        if event.content is not None:
-                            output_text += event.content
-                            live.update(Markdown(output_text))
-                            if event.token_usage:
-                                output_tokens += event.token_usage.output_tokens
-                                input_tokens = event.token_usage.input_tokens
-                        assert isinstance(event, ChatMessageStreamDelta)
+                        chat_message_stream_deltas.append(event)
+                        live.update(
+                            Markdown(agglomerate_stream_deltas(chat_message_stream_deltas).render_as_markdown())
+                        )
                         yield event
-
-                chat_message = ChatMessage(
-                    role="assistant",
-                    content=output_text,
-                    token_usage=TokenUsage(input_tokens=input_tokens, output_tokens=output_tokens),
-                )
+                chat_message = agglomerate_stream_deltas(chat_message_stream_deltas)
                 memory_step.model_output_message = chat_message
                 output_text = chat_message.content
             else:
