@@ -22,6 +22,7 @@ from collections.abc import Generator
 from contextlib import nullcontext as does_not_raise
 from dataclasses import dataclass
 from pathlib import Path
+from textwrap import dedent
 from typing import Optional
 from unittest.mock import MagicMock, patch
 
@@ -1580,6 +1581,11 @@ class TestCodeAgent:
         assert isinstance(output, AgentText)
         assert output == "got an error"
         assert '    print("Failing due to unexpected indent")' in str(agent.memory.steps)
+        assert isinstance(agent.memory.steps[-2], ActionStep)
+        assert agent.memory.steps[-2].code_action == dedent("""a = 2
+b = a * 2
+    print("Failing due to unexpected indent")
+print("Ok, calculation done!")""")
 
     def test_end_code_appending(self):
         # Checking original output message
