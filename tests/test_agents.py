@@ -39,6 +39,7 @@ from smolagents.agent_types import AgentImage, AgentText
 from smolagents.agents import (
     AgentError,
     AgentMaxStepsError,
+    AgentToolCallError,
     CodeAgent,
     MultiStepAgent,
     ToolCall,
@@ -67,7 +68,6 @@ from smolagents.utils import (
     BASE_BUILTIN_MODULES,
     AgentExecutionError,
     AgentGenerationError,
-    AgentToolCallError,
     AgentToolExecutionError,
 )
 
@@ -392,7 +392,10 @@ class TestAgent:
         assert "7.2904" in output
         assert agent.memory.steps[0].task == "What is 2 multiplied by 3.6452?"
         assert "7.2904" in agent.memory.steps[1].observations
-        assert agent.memory.steps[2].model_output == "Called Tool: 'final_answer' with arguments: {'answer': '7.2904'}"
+        assert (
+            agent.memory.steps[2].model_output
+            == "Tool call call_1: calling 'final_answer' with arguments: {'answer': '7.2904'}"
+        )
 
     def test_toolcalling_agent_handles_image_tool_outputs(self, shared_datadir):
         import PIL.Image
@@ -409,7 +412,9 @@ class TestAgent:
 
             return PIL.Image.open(shared_datadir / "000000039769.png")
 
-        agent = ToolCallingAgent(tools=[fake_image_generation_tool], model=FakeToolCallModelImage())
+        agent = ToolCallingAgent(
+            tools=[fake_image_generation_tool], model=FakeToolCallModelImage(), verbosity_level=10
+        )
         output = agent.run("Make me an image.")
         assert isinstance(output, AgentImage)
         assert isinstance(agent.state["image.png"], PIL.Image.Image)
@@ -434,7 +439,7 @@ class TestAgent:
         assert output == "The image is a cat."
 
     def test_fake_code_agent(self):
-        agent = CodeAgent(tools=[PythonInterpreterTool()], model=FakeCodeModel())
+        agent = CodeAgent(tools=[PythonInterpreterTool()], model=FakeCodeModel(), verbosity_level=10)
         output = agent.run("What is 2 multiplied by 3.6452?")
         assert isinstance(output, float)
         assert output == 7.2904
@@ -535,6 +540,7 @@ class TestAgent:
             model=FakeCodeModelFunctionDef(),
             max_steps=2,
             additional_authorized_imports=["numpy"],
+            verbosity_level=100,
         )
         res = agent.run("ok")
         assert res[0] == 0.5
@@ -580,7 +586,7 @@ class TestAgent:
         agent.replay()
 
         str_output = agent_logger.console.export_text()
-        assert "Called Tool" in str_output
+        assert "Tool call" in str_output
         assert "arguments" in str_output
 
     def test_code_nontrivial_final_answer_works(self):
@@ -603,7 +609,7 @@ nested_answer()
 
     def test_transformers_toolcalling_agent(self):
         @tool
-        def weather_api(location: str, celsius: bool = False) -> str:
+        def weather_api(location: str, celsius: str = "") -> str:
             """
             Gets the weather in the next days at given location.
             Secretly this tool does not care about the location, it hates the weather everywhere.
@@ -1256,7 +1262,7 @@ class TestToolCallingAgent:
         assert agent.memory.steps[1].observations == "The weather in Paris on date:today is sunny."
 
     @patch("openai.OpenAI")
-    def test_toolcalling_agent_stream_outputs_multiple_tool_calls(self, mock_openai_client):
+    def test_toolcalling_agent_stream_outputs_multiple_tool_calls(self, mock_openai_client, test_tool):
         """Test that ToolCallingAgent with stream_outputs=True returns the first final_answer when multiple are called."""
         mock_client = mock_openai_client.return_value
         from smolagents import OpenAIServerModel
@@ -1294,16 +1300,16 @@ class TestToolCallingAgent:
                     ChoiceDeltaToolCall(
                         index=1,
                         id="call_2",
-                        function=ChoiceDeltaToolCallFunction(name="final_answer"),
+                        function=ChoiceDeltaToolCallFunction(name="test_tool"),
                         type="function",
                     )
                 ]
             ),
             ChoiceDelta(
-                tool_calls=[ChoiceDeltaToolCall(index=1, function=ChoiceDeltaToolCallFunction(arguments='{"an'))]
+                tool_calls=[ChoiceDeltaToolCall(index=1, function=ChoiceDeltaToolCallFunction(arguments='{"in'))]
             ),
             ChoiceDelta(
-                tool_calls=[ChoiceDeltaToolCall(index=1, function=ChoiceDeltaToolCallFunction(arguments='swer"'))]
+                tool_calls=[ChoiceDeltaToolCall(index=1, function=ChoiceDeltaToolCallFunction(arguments='put"'))]
             ),
             ChoiceDelta(
                 tool_calls=[ChoiceDeltaToolCall(index=1, function=ChoiceDeltaToolCallFunction(arguments=': "out'))]
@@ -1334,13 +1340,13 @@ class TestToolCallingAgent:
 
         model = OpenAIServerModel(model_id="fakemodel")
 
-        agent = ToolCallingAgent(model=model, tools=[], max_steps=1, stream_outputs=True, verbosity_level=100)
+        agent = ToolCallingAgent(model=model, tools=[test_tool], max_steps=1, stream_outputs=True)
         result = agent.run("Make 2 calls to final answer: return both 'output1' and 'output2'")
         assert len(agent.memory.steps[-1].model_output_message.tool_calls) == 2
         assert agent.memory.steps[-1].model_output_message.tool_calls[0].function.name == "final_answer"
-        assert agent.memory.steps[-1].model_output_message.tool_calls[1].function.name == "final_answer"
+        assert agent.memory.steps[-1].model_output_message.tool_calls[1].function.name == "test_tool"
 
-        # The agent should return the first final_answer result
+        # The agent should return the final answer call
         assert result == "output1"
 
     @patch("huggingface_hub.InferenceClient")
@@ -1394,7 +1400,7 @@ class TestToolCallingAgent:
         answer = agent.run("Fake task.")
         assert answer == "2CUSTOM"
 
-    def test_custom_final_answer_with_custom_inputs(self):
+    def test_custom_final_answer_with_custom_inputs(self, test_tool):
         class CustomFinalAnswerToolWithCustomInputs(FinalAnswerTool):
             inputs = {
                 "answer1": {"type": "string", "description": "First part of the answer."},
@@ -1402,7 +1408,7 @@ class TestToolCallingAgent:
             }
 
             def forward(self, answer1: str, answer2: str) -> str:
-                return answer1 + "CUSTOM" + answer2
+                return answer1 + " and " + answer2
 
         model = MagicMock()
         model.generate.return_value = ChatMessage(
@@ -1415,12 +1421,19 @@ class TestToolCallingAgent:
                     function=ChatMessageToolCallFunction(
                         name="final_answer", arguments={"answer1": "1", "answer2": "2"}
                     ),
-                )
+                ),
+                ChatMessageToolCall(
+                    id="call_1",
+                    type="function",
+                    function=ChatMessageToolCallFunction(name="test_tool", arguments={"input": "3"}),
+                ),
             ],
         )
-        agent = ToolCallingAgent(tools=[CustomFinalAnswerToolWithCustomInputs()], model=model)
+        agent = ToolCallingAgent(tools=[test_tool, CustomFinalAnswerToolWithCustomInputs()], model=model)
         answer = agent.run("Fake task.")
-        assert answer == "1CUSTOM2"
+        assert answer == "1 and 2"
+        assert agent.memory.steps[-1].model_output_message.tool_calls[0].function.name == "final_answer"
+        assert agent.memory.steps[-1].model_output_message.tool_calls[1].function.name == "test_tool"
 
     @pytest.mark.parametrize(
         "test_case",
@@ -1434,9 +1447,9 @@ class TestToolCallingAgent:
                         function=ChatMessageToolCallFunction(name="test_tool", arguments={"input": "test_value"}),
                     )
                 ],
-                "expected_model_output": "Called Tool: 'test_tool' with arguments: {'input': 'test_value'}",
+                "expected_model_output": "Tool call call_1: calling 'test_tool' with arguments: {'input': 'test_value'}",
                 "expected_observations": "Processed: test_value",
-                "expected_final_outputs": [None],
+                "expected_final_outputs": ["Processed: test_value"],
                 "expected_error": None,
             },
             # Case 1: Multiple tool calls
@@ -1453,9 +1466,9 @@ class TestToolCallingAgent:
                         function=ChatMessageToolCallFunction(name="test_tool", arguments={"input": "value2"}),
                     ),
                 ],
-                "expected_model_output": "Called Tool: 'test_tool' with arguments: {'input': 'value1'}\nCalled Tool: 'test_tool' with arguments: {'input': 'value2'}",
+                "expected_model_output": "Tool call call_1: calling 'test_tool' with arguments: {'input': 'value1'}\nTool call call_2: calling 'test_tool' with arguments: {'input': 'value2'}",
                 "expected_observations": "Processed: value1\nProcessed: value2",
-                "expected_final_outputs": [None, None],
+                "expected_final_outputs": ["Processed: value1", "Processed: value2"],
                 "expected_error": None,
             },
             # Case 2: Invalid tool name
@@ -1483,8 +1496,8 @@ class TestToolCallingAgent:
             # Case 4: Empty tool calls list
             {
                 "tool_calls": [],
-                "expected_model_output": None,
-                "expected_observations": None,
+                "expected_model_output": "",
+                "expected_observations": "",
                 "expected_final_outputs": [],
                 "expected_error": None,
             },
@@ -1499,8 +1512,8 @@ class TestToolCallingAgent:
                         ),
                     )
                 ],
-                "expected_model_output": "Called Tool: 'final_answer' with arguments: {'answer': 'This is the final answer'}",
-                "expected_observations": None,
+                "expected_model_output": "Tool call call_1: calling 'final_answer' with arguments: {'answer': 'This is the final answer'}",
+                "expected_observations": "This is the final answer",
                 "expected_final_outputs": ["This is the final answer"],
                 "expected_error": None,
             },
@@ -2045,7 +2058,6 @@ def test_tool_calling_agents_raises_tool_call_error_being_invoked_with_wrong_arg
     @tool
     def _sample_tool(prompt: str) -> str:
         """Tool that returns same string
-
         Args:
             prompt: The string to return
         Returns:
