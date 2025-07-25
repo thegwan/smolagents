@@ -1723,6 +1723,18 @@ class AmazonBedrockServerModel(ApiModel):
     allowing for customized model inference, guardrail configuration, message handling,
     and other parameters allowed by boto3 API.
 
+    Authentication:
+
+    Amazon Bedrock supports multiple authentication methods:
+    - Default AWS credentials:
+       Use the default AWS credential chain (e.g., IAM roles, IAM users).
+    - API Key Authentication (requires `boto3 >= 1.39.0`):
+       Set the API key using the `AWS_BEARER_TOKEN_BEDROCK` environment variable.
+
+    > [!TIP]
+    > API key support requires `boto3 >= 1.39.0`.
+    > For users not relying on API key authentication, the minimum supported version is `boto3 >= 1.36.18`.
+
     Parameters:
         model_id (`str`):
             The model identifier to use on Bedrock (e.g. "us.amazon.nova-pro-v1:0").
@@ -1739,17 +1751,6 @@ class AmazonBedrockServerModel(ApiModel):
             Whether to flatten messages as text.
         **kwargs
             Additional keyword arguments passed directly to the underlying API calls.
-
-    Authentication:
-        Amazon Bedrock supports multiple authentication methods:
-
-        1. **Default AWS credentials** (IAM role, AWS credentials from environment, etc.):
-           The client will use the default credential chain automatically.
-
-        2. **API Keys** (requires boto3 >= 1.39.0):
-           Set the API key as the AWS_BEARER_TOKEN_BEDROCK environment variable.
-           Note: API key support requires boto3 >= 1.39.0, but basic Bedrock functionality 
-           works with boto3 >= 1.36.18 for users not requiring API key authentication.
 
     Examples:
         Creating a model instance with default settings:
