@@ -1740,6 +1740,17 @@ class AmazonBedrockServerModel(ApiModel):
         **kwargs
             Additional keyword arguments passed directly to the underlying API calls.
 
+    Authentication:
+        Amazon Bedrock supports multiple authentication methods:
+
+        1. **Default AWS credentials** (IAM role, AWS credentials from environment, etc.):
+           The client will use the default credential chain automatically.
+
+        2. **API Keys** (requires boto3 >= 1.39.0):
+           Set the API key as the AWS_BEARER_TOKEN_BEDROCK environment variable.
+           Note: API key support requires boto3 >= 1.39.0, but basic Bedrock functionality 
+           works with boto3 >= 1.36.18 for users not requiring API key authentication.
+
     Examples:
         Creating a model instance with default settings:
         ```python
