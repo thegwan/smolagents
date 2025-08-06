@@ -517,14 +517,24 @@ print(check_digits)
         result, _ = evaluate_python_code(code, {}, state={})
         assert result == {10, 19, 20}
 
-    def test_break_continue(self):
+    def test_break(self):
         code = "for i in range(10):\n    if i == 5:\n        break\ni"
         result, _ = evaluate_python_code(code, {"range": range}, state={})
         assert result == 5
 
-        code = "for i in range(10):\n    if i == 5:\n        continue\ni"
+    def test_pass(self):
+        code = "for i in range(10):\n    if i == 5:\n        pass\ni"
         result, _ = evaluate_python_code(code, {"range": range}, state={})
         assert result == 9
+
+    def test_continue(self):
+        code = "cnt = 0\nfor i in range(10):\n    continue\n    cnt += 1\ncnt"
+        result, _ = evaluate_python_code(code, {"range": range}, state={})
+        assert result == 0
+
+        code = "cnt = 0\nfor i in range(3):\n    if i == 1:\n        continue\n    cnt += 1\ncnt"
+        result, _ = evaluate_python_code(code, {"range": range}, state={})
+        assert result == 2
 
     def test_call_int(self):
         code = "import math\nstr(math.ceil(149))"
@@ -984,20 +994,6 @@ S4 = S1.intersection(S2)
         evaluate_python_code(code, {}, state=state)
         assert state["S3"] == {"a"}
         assert state["S4"] == {"b", "c"}
-
-    def test_break(self):
-        code = """
-i = 0
-
-while True:
-    i+= 1
-    if i==3:
-        break
-
-i"""
-        result, is_final_answer = evaluate_python_code(code, {"print": print, "round": round}, state={})
-        assert result == 3
-        assert not is_final_answer
 
     def test_return(self):
         # test early returns
