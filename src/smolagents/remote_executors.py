@@ -440,6 +440,9 @@ class DockerExecutor(RemotePythonExecutor):
 
             self.base_url = f"http://{host}:{port}"
 
+            # Wait for Jupyter to start
+            self._wait_for_server()
+
             # Create new kernel via HTTP
             self.kernel_id = _create_kernel_http(f"{self.base_url}/api/kernels", self.logger)
 
@@ -473,6 +476,21 @@ class DockerExecutor(RemotePythonExecutor):
     def delete(self):
         """Ensure cleanup on deletion."""
         self.cleanup()
+
+    def _wait_for_server(self):
+        retries = 0
+        jupyter_ready = False
+        while not jupyter_ready and retries < 10:
+            try:
+                if requests.get(f"{self.base_url}/api/kernelspecs", timeout=2).status_code == 200:
+                    jupyter_ready = True
+                else:
+                    self.logger.log("Jupyter not ready, waiting...", level=LogLevel.INFO)
+            except requests.RequestException:
+                self.logger.log("Jupyter not ready, waiting...", level=LogLevel.INFO)
+            if not jupyter_ready:
+                time.sleep(1)
+                retries += 1
 
 
 class ModalExecutor(RemotePythonExecutor):
