@@ -2,6 +2,8 @@
   sections:
   - local: index
     title: 소개
+  - local: installation
+    title: 설치 옵션
 #  - local: guided_tour
 #    title: 안내서
 - title: 튜토리얼
