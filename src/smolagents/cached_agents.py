@@ -48,6 +48,8 @@ from rich.panel import Panel
 from rich.rule import Rule
 from rich.text import Text
 
+from .caching import AgenticPlanCache
+
 
 if TYPE_CHECKING:
     import PIL.Image
@@ -306,6 +308,7 @@ class MultiStepAgent(ABC):
         model: Model,
         small_model: Model,
         large_model: Model,
+        plan_cache: AgenticPlanCache,
         prompt_templates: PromptTemplates | None = None,
         instructions: str | None = None,
         max_steps: int = 20,
@@ -363,6 +366,7 @@ class MultiStepAgent(ABC):
         self.monitor = DualMonitor(self.small_model, self.large_model, self.logger)
         self._setup_step_callbacks(step_callbacks)
         self.stream_outputs = False
+        self.plan_cache = plan_cache
 
     @property
     def system_prompt(self) -> str:
