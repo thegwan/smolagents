@@ -1,11 +1,11 @@
-from ast import Tuple
+
 import copy
 import json
 import re
 import time
 from typing import Any, Optional, OrderedDict
 
-from smolagents.src.smolagents.monitoring import TokenUsage
+from smolagents.monitoring import TokenUsage
 
 
 class AgenticPlanCache:
@@ -131,7 +131,7 @@ class AgenticPlanCache:
         return copy.deepcopy(entry) if entry is not None else None
 
 
-    def extract_keyword(self, small_model, task_text: str) -> Tuple[str, TokenUsage]:
+    def extract_keyword(self, small_model, task_text: str) -> (str, TokenUsage):
         """
         Use the provided small_model to extract a single short keyword for the task.
         small_model should implement `.generate(messages)` and return an object with `.content` and `.token_usage`.
@@ -150,7 +150,7 @@ class AgenticPlanCache:
         filtered = self.normalize_keyword(raw)
         return filtered, token_usage
 
-    def extract_keyword_and_search_for_hit(self, small_model, task_text: str, threshold: Optional[str] = None) -> Tuple[str, Optional[dict], TokenUsage, dict]:
+    def extract_keyword_and_search_for_hit(self, small_model, task_text: str, threshold: Optional[str] = None) -> (str, Optional[dict], TokenUsage, dict):
         """
         Runs keyword extraction with the small model and does an exact-match cache lookup.
         Returns: (keyword, cached_entry_or_None, accumulated_token_usage, latency_info)
@@ -202,7 +202,7 @@ class AgenticPlanCache:
             + plan_string
         )
         # call large_model
-        resp = large_model.generate([{"role": "user", "content": induction_prompt}], response_format={"type": "json_object"})
+        resp = large_model.generate([{"role": "user", "content": induction_prompt}], response_format={"type": "json_object"}, stop_sequences=["<end_plan>"])
         token_usage = getattr(resp, "token_usage", None) or TokenUsage(0, 0)
 
         # update induction overhead accounting
@@ -235,19 +235,22 @@ class AgenticPlanCache:
     def _extract_plan_template_as_text(self, conversation_trace: dict[str, Any]) -> str:
         """
         Extract a plain plan string from the conversation trace.
+        Handles ChatMessage objects by converting them to dictionaries.
         """
-        # if isinstance(conversation_trace, dict):
-        #     if "plan" in conversation_trace and isinstance(conversation_trace["plan"], str):
-        #         return conversation_trace["plan"]
-        #     if "conversation" in conversation_trace:
-        #         parts = []
-        #         for entry in conversation_trace["conversation"]:
-        #             out = entry.get("output") or entry.get("message") or entry.get("content")
-        #             if out:
-        #                 parts.append(str(out))
-        #         return "\n\n".join(parts)
-        # # otherwise stringify the traec
-        return json.dumps(conversation_trace, ensure_ascii=False, indent=2)
+        def serialize_obj(obj):
+            """Recursively serialize objects, handling ChatMessage and other non-serializable types."""
+            if hasattr(obj, 'dict'):  # ChatMessage and other objects with dict() method
+                return obj.dict()
+            elif isinstance(obj, dict):
+                return {k: serialize_obj(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [serialize_obj(item) for item in obj]
+            else:
+                return obj
+        
+        # Serialize the conversation trace to handle ChatMessage objects
+        serialized_trace = serialize_obj(conversation_trace)
+        return json.dumps(serialized_trace, ensure_ascii=False, indent=2)
 
     def _validate_and_fix_template(self, template: dict[str, Any]) -> dict:
         """Ensure required fields exist and apply minimal fixes."""
@@ -285,3 +288,26 @@ class AgenticPlanCache:
         # give up
         raise ValueError("Failed to extract JSON from text")
 
+    def adapt_cached_plan(self, small_model, cached_template: dict[str, Any], task: str) -> tuple[str, TokenUsage]:
+        """
+        Adapt a cached plan template to a new task.
+        """
+        adapt_prompt = [
+            {
+                "role": "system", 
+                "content": "You are a lightweight planner. Given a cached plan template and a new task, "
+                          "adapt the template to the new task. Keep structure (facts survey + plan) and "
+                          "replace problem-specific details. The adapted plan should be in the format of "
+                          "a GAIA plan."
+            },
+            {
+                "role": "user",
+                "content": f"Task:\n{task}\n\nCached plan template:\n{cached_template.get('plan_template', '')}\n\nPlease output the adapted plan."
+            }
+        ]
+
+        adapt_msg = small_model.generate(adapt_prompt, stop_sequences=["<end_plan>"])
+        adapt_token_usage = getattr(adapt_msg, "token_usage", None) or TokenUsage(0, 0)
+        adapted_plan = getattr(adapt_msg, "content", "") or ""
+        
+        return adapted_plan, adapt_token_usage

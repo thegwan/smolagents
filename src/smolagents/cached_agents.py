@@ -367,6 +367,7 @@ class MultiStepAgent(ABC):
         self._setup_step_callbacks(step_callbacks)
         self.stream_outputs = False
         self.plan_cache = plan_cache
+        self.current_keyword = None  # store for induce and insert if it gets the task correct
 
     @property
     def system_prompt(self) -> str:
@@ -670,22 +671,59 @@ You have been provided with these additional arguments, that you can access dire
                     ],
                 )
             ]
-            if self.stream_outputs and hasattr(self.model, "generate_stream"):
-                pass
-                # plan_message_content = ""
-                # output_stream = self.model.generate_stream(input_messages, stop_sequences=["<end_plan>"])  # type: ignore
-                # input_tokens, output_tokens = 0, 0
-                # with Live("", console=self.logger.console, vertical_overflow="visible") as live:
-                #     for event in output_stream:
-                #         if event.content is not None:
-                #             plan_message_content += event.content
-                #             live.update(Markdown(plan_message_content))
-                #             if event.token_usage:
-                #                 input_tokens = event.token_usage.input_tokens
-                #                 output_tokens += event.token_usage.output_tokens
-                #         yield event
+            if self.plan_cache:
+                keyword, cached_template, keyword_tokens, latency_info = self.plan_cache.extract_keyword_and_search_for_hit(self.small_model, task)
+                self.current_keyword = keyword
+                # $$$$$$$$$$$
+                # update small model token count
+                self.monitor.update_metrics(
+                    type("StepLog", (), {
+                        "token_usage": keyword_tokens,
+                        "model_used": "small",
+                        "description": "keyword extraction",
+                        "timing": Timing(start_time=start_time, end_time=time.time())
+                    })()
+                )
+                # update total token count
+                input_tokens, output_tokens = 0, 0
+                if keyword_tokens:
+                    input_tokens = keyword_tokens.input_tokens
+                    output_tokens = keyword_tokens.output_tokens
+                if cached_template is not None:
+                    # Cache HIT, adapt using small model
+                    print(f"Cache HIT on {keyword}, adapting using small model")
+                    plan_message_content, adapt_token_usage = self.plan_cache.adapt_cached_plan(self.small_model, cached_template, task)
+                    # $$$$$$$$$$$
+                    # update small model token count
+                    self.monitor.update_metrics(
+                        type("StepLog", (), {
+                            "token_usage": adapt_token_usage,
+                            "model_used": "small",
+                            "description": "template adaptation",
+                            "timing": Timing(start_time=start_time, end_time=time.time())
+                        })()
+                    )
+                    # Add adaptation tokens to total
+                    input_tokens += adapt_token_usage.input_tokens
+                    output_tokens += adapt_token_usage.output_tokens
+                else:
+                    plan_message_content = self.large_model.generate(input_messages, stop_sequences=["<end_plan>"])
+                    # $$$$$$$$$$$
+                    self.monitor.update_metrics(
+                        type('StepLog', (), {  
+                            'token_usage': plan_message_content.token_usage,
+                            'model_used': 'large',   
+                            'description': 'planning step',
+                            'timing': Timing(start_time=time.time(), end_time=time.time())
+                        })()
+                    )
+                    # Add planning tokens to total
+                    if plan_message_content.token_usage:
+                        input_tokens += plan_message_content.token_usage.input_tokens
+                        output_tokens += plan_message_content.token_usage.output_tokens
+
             else:
-                plan_message = self.model.generate(input_messages, stop_sequences=["<end_plan>"])
+                plan_message = self.large_model.generate(input_messages, stop_sequences=["<end_plan>"])
                 # $$$$$$$$$$$
                 self.monitor.update_metrics(
                     type('StepLog', (), {  
@@ -736,24 +774,54 @@ You have been provided with these additional arguments, that you can access dire
                 ],
             )
             input_messages = [plan_update_pre] + memory_messages + [plan_update_post]
-            if self.stream_outputs and hasattr(self.model, "generate_stream"):
-                # plan_message_content = ""
-                # input_tokens, output_tokens = 0, 0
-                # with Live("", console=self.logger.console, vertical_overflow="visible") as live:
-                #     for event in self.model.generate_stream(
-                #         input_messages,
-                #         stop_sequences=["<end_plan>"],
-                #     ):  # type: ignore
-                #         if event.content is not None:
-                #             plan_message_content += event.content
-                #             live.update(Markdown(plan_message_content))
-                #             if event.token_usage:
-                #                 input_tokens = event.token_usage.input_tokens
-                #                 output_tokens += event.token_usage.output_tokens
-                #         yield event
-                parse_schema
+            if self.plan_cache is not None:
+                keyword, cached_template, keyword_tokens, latency_info = self.plan_cache.extract_keyword_and_search_for_hit(self.small_model, task)
+                self.current_keyword = keyword
+                # $$$$$$$$$$$
+                self.monitor.update_metrics(
+                    type('StepLog', (), {  
+                        'token_usage': keyword_tokens,
+                        'model_used': 'small',   
+                        'description': 'keyword extraction',
+                        'timing': Timing(start_time=time.time(), end_time=time.time())
+                    })()
+                )
+                # Initialize token counts for this branch
+                input_tokens, output_tokens = 0, 0
+                if keyword_tokens:
+                    input_tokens = keyword_tokens.input_tokens
+                    output_tokens = keyword_tokens.output_tokens
+                if cached_template is not None:
+                    plan_message_content, adapt_token_usage = self.plan_cache.adapt_cached_plan(self.small_model, cached_template, task)
+                    # $$$$$$$$$$$
+                    self.monitor.update_metrics(
+                        type('StepLog', (), {  
+                            'token_usage': adapt_token_usage,
+                            'model_used': 'small',   
+                            'description': 'template adaptation',
+                            'timing': Timing(start_time=time.time(), end_time=time.time())
+                        })()
+                    )
+                    # Add adaptation tokens to total
+                    input_tokens += adapt_token_usage.input_tokens
+                    output_tokens += adapt_token_usage.output_tokens
+                else:
+                    plan_message_content = self.large_model.generate(input_messages, stop_sequences=["<end_plan>"])
+                    # $$$$$$$$$$$
+                    self.monitor.update_metrics(
+                        type('StepLog', (), {  
+                            'token_usage': plan_message_content.token_usage,
+                            'model_used': 'large',   
+                            'description': 'planning step update',
+                            'timing': Timing(start_time=time.time(), end_time=time.time())
+                        })()
+                    )
+                    # Add planning tokens to total
+                    if plan_message_content.token_usage:
+                        input_tokens += plan_message_content.token_usage.input_tokens
+                        output_tokens += plan_message_content.token_usage.output_tokens
             else:
-                plan_message = self.model.generate(input_messages, stop_sequences=["<end_plan>"])
+                plan_message = self.large_model.generate(input_messages, stop_sequences=["<end_plan>"])
                 # $$$$$$$$$$$
                 self.monitor.update_metrics(
                     type('StepLog', (), {  
@@ -879,12 +947,12 @@ You have been provided with these additional arguments, that you can access dire
             )
         )
         try:
-            chat_message: ChatMessage = self.model.generate(messages)
+            chat_message: ChatMessage = self.small_model.generate(messages)
             # $$$$$$$$$$$
             self.monitor.update_metrics(
                 type('StepLog', (), {  
                     'token_usage': chat_message.token_usage,
-                    'model_used': 'large',   
+                    'model_used': 'small',   
                     'description': 'final answer',
                     'timing': Timing(start_time=time.time(), end_time=time.time())
                 })()
@@ -1039,6 +1107,14 @@ You have been provided with these additional arguments, that you can access dire
             "model": {
                 "class": self.model.__class__.__name__,
                 "data": self.model.to_dict(),
+            },
+            "small_model": {
+                "class": self.small_model.__class__.__name__,
+                "data": self.small_model.to_dict(),
+            },
+            "large_model": {
+                "class": self.large_model.__class__.__name__,
+                "data": self.large_model.to_dict(),
             },
             "managed_agents": [managed_agent.to_dict() for managed_agent in self.managed_agents.values()],
             "prompt_templates": self.prompt_templates,
@@ -1335,7 +1411,7 @@ class ToolCallingAgent(MultiStepAgent):
                 # chat_message = agglomerate_stream_deltas(chat_message_stream_deltas)
                 pass
             else:
-                chat_message: ChatMessage = self.model.generate(
+                chat_message: ChatMessage = self.small_model.generate(
                     input_messages,
                     stop_sequences=["Observation:", "Calling tools:"],
                     tools_to_call_from=self.tools_and_managed_agents,
@@ -1344,7 +1420,7 @@ class ToolCallingAgent(MultiStepAgent):
                 self.monitor.update_metrics(
                     type('StepLog', (), {  
                         'token_usage': chat_message.token_usage,
-                        'model_used': 'large',   
+                        'model_used': 'small',   
                         'description': 'tool callingstep stream',
                         'timing': Timing(start_time=time.time(), end_time=time.time())
                     })()
@@ -1364,7 +1440,7 @@ class ToolCallingAgent(MultiStepAgent):
 
         if chat_message.tool_calls is None or len(chat_message.tool_calls) == 0:
             try:
-                chat_message = self.model.parse_tool_calls(chat_message)
+                chat_message = self.large_model.parse_tool_calls(chat_message)
             except Exception as e:
                 raise AgentParsingError(f"Error while parsing tool call from model output: {e}", self.logger)
         else:
@@ -1716,7 +1792,7 @@ class CodeAgent(MultiStepAgent):
             #     output_text = chat_message.content
                 pass
             else:
-                chat_message: ChatMessage = self.model.generate(
+                chat_message: ChatMessage = self.small_model.generate(
                     input_messages,
                     stop_sequences=stop_sequences,
                     **additional_args,
@@ -1725,7 +1801,7 @@ class CodeAgent(MultiStepAgent):
                 self.monitor.update_metrics(
                     type('StepLog', (), {  
                         'token_usage': chat_message.token_usage,
-                        'model_used': 'large',   
+                        'model_used': 'small',   
                         'description': 'code agentstep stream',
                         'timing': Timing(start_time=time.time(), end_time=time.time())
                     })()
