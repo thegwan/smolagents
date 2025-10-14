@@ -116,6 +116,35 @@ class Monitor:
         console_outputs += "]"
         self.logger.log(Text(console_outputs, style="dim"), level=1)
 
+class DualMonitor:
+    def __init__(self, small_model, large_model, logger):
+        self.small_monitor = Monitor(small_model, logger)
+        self.large_monitor = Monitor(large_model, logger)
+
+    def reset(self):
+        self.small_monitor.reset()
+        self.large_monitor.reset()
+
+    def update_metrics(self, step_log):
+        """Dispatch metrics to the correct monitor depending on which model was used."""
+        model_used = getattr(step_log, "model_used", None)
+        if model_used == "small":
+            self.small_monitor.update_metrics(step_log)
+        elif model_used == "large":
+            self.large_monitor.update_metrics(step_log)
+        elif model_used is None:
+            # If model_used is not set, use the large monitor (default behavior)
+            self.large_monitor.update_metrics(step_log)
+        else:
+            raise ValueError(f"Unknown model used: {model_used}")
+
+    def get_total_token_counts(self) -> TokenUsage:
+        total_input = self.small_monitor.total_input_token_count + self.large_monitor.total_input_token_count
+        total_output = self.small_monitor.total_output_token_count + self.large_monitor.total_output_token_count
+        return TokenUsage(input_tokens=total_input, output_tokens=total_output)
+
+
+
 
 class LogLevel(IntEnum):
     OFF = -1  # No output
