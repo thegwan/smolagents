@@ -300,6 +300,7 @@ class MultiStepAgent(ABC):
             - Take the final answer and the agent's memory as arguments.
             - Return a boolean indicating whether the final answer is valid.
         return_full_result (`bool`, default `False`): Whether to return the full [`RunResult`] object or just the final answer output from the agent run.
+        k_keywords (`int`, default `1`): Number of keywords to extract for plan caching. Higher values increase cache hit probability but also extraction cost.
     """
 
     def __init__(
@@ -323,6 +324,7 @@ class MultiStepAgent(ABC):
         final_answer_checks: list[Callable] | None = None,
         return_full_result: bool = False,
         logger: AgentLogger | None = None,
+        k_keywords: int = 1,
     ):
         self.agent_name = self.__class__.__name__
         self.model = model
@@ -367,7 +369,9 @@ class MultiStepAgent(ABC):
         self._setup_step_callbacks(step_callbacks)
         self.stream_outputs = False
         self.plan_cache = plan_cache
+        self.k_keywords = k_keywords
         self.current_keyword = None  # store for induce and insert if it gets the task correct
+        self.current_keywords = []  # store all extracted keywords for induce and insert
 
     @property
     def system_prompt(self) -> str:
@@ -672,8 +676,9 @@ You have been provided with these additional arguments, that you can access dire
                 )
             ]
             if self.plan_cache:
-                keyword, cached_template, keyword_tokens, latency_info = self.plan_cache.extract_keyword_and_search_for_hit(self.small_model, task)
+                keyword, cached_template, keyword_tokens, latency_info, all_keywords = self.plan_cache.extract_keyword_and_search_for_hit(self.small_model, task, self.k_keywords)
                 self.current_keyword = keyword
+                self.current_keywords = all_keywords
                 # $$$$$$$$$$$
                 # update small model token count
                 self.monitor.update_metrics(
@@ -775,8 +780,9 @@ You have been provided with these additional arguments, that you can access dire
             )
             input_messages = [plan_update_pre] + memory_messages + [plan_update_post]
             if self.plan_cache is not None:
-                keyword, cached_template, keyword_tokens, latency_info = self.plan_cache.extract_keyword_and_search_for_hit(self.small_model, task)
+                keyword, cached_template, keyword_tokens, latency_info, all_keywords = self.plan_cache.extract_keyword_and_search_for_hit(self.small_model, task, self.k_keywords)
                 self.current_keyword = keyword
+                self.current_keywords = all_keywords
                 # $$$$$$$$$$$
                 self.monitor.update_metrics(
                     type('StepLog', (), {  
@@ -1338,6 +1344,7 @@ class ToolCallingAgent(MultiStepAgent):
         planning_interval: int | None = None,
         stream_outputs: bool = False,
         max_tool_threads: int | None = None,
+        k_keywords: int = 1,
         **kwargs,
     ):
         prompt_templates = prompt_templates or yaml.safe_load(
@@ -1350,6 +1357,7 @@ class ToolCallingAgent(MultiStepAgent):
             large_model=large_model,
             prompt_templates=prompt_templates,
             planning_interval=planning_interval,
+            k_keywords=k_keywords,
             **kwargs,
         )
         # Streaming setup

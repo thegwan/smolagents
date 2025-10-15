@@ -131,36 +131,57 @@ class AgenticPlanCache:
         return copy.deepcopy(entry) if entry is not None else None
 
 
-    def extract_keyword(self, small_model, task_text: str) -> (str, TokenUsage):
+    def extract_keyword(self, small_model, task_text: str, k: int = 1) -> (list[str], TokenUsage):
         """
-        Use the provided small_model to extract a single short keyword for the task.
+        Use the provided small_model to extract k short keywords for the task.
         small_model should implement `.generate(messages)` and return an object with `.content` and `.token_usage`.
-        Returns: (filtered_keyword, token_usage)
+        Returns: (list of filtered_keywords, token_usage)
         """
-        # short prompt that asks the small model for a single keyword only (paper)
-        prompt = [
-            {"role": "system", "content": "You are a compact keyword extractor. Reply with a single short keyword or short phrase (1-3 words) that captures the core semantic intent of the user's task. Reply with the keyword(s) only."},
-            {"role": "user", "content": task_text},
-        ]
+        if k == 1:
+            # short prompt that asks the small model for a single keyword only 
+            prompt = [
+                {"role": "system", "content": "You are a compact keyword extractor. Reply with a single short keyword or short phrase (1-3 words) that captures the core semantic intent of the user's task. Reply with the keyword(s) only. Do not include any specific details about the task, only the core semantic intent."},
+                {"role": "user", "content": task_text},
+            ]
+        else:
+            # prompt for multiple keywords
+            prompt = [
+                {"role": "system", "content": f"You are a compact keyword extractor. Reply with exactly {k} different short keywords or short phrases (1-3 words each) that capture different aspects of the core semantic intent of the user's task. Each keyword should be on a separate line. Reply with the keywords only. Do not include any specific details about the task, only the core semantic intent."},
+                {"role": "user", "content": task_text},
+            ]
+        
         # call small model
         resp = small_model.generate(prompt)
         # extract content + token usage
         raw = getattr(resp, "content", "") or ""
         token_usage = getattr(resp, "token_usage", None) or TokenUsage(0, 0)
-        filtered = self.normalize_keyword(raw)
-        return filtered, token_usage
+        
+        if k == 1:
+            filtered = self.normalize_keyword(raw)
+            return [filtered] if filtered else [], token_usage
+        else:
+            # Split by lines and normalize each keyword
+            keywords = []
+            for line in raw.strip().split('\n'):
+                line = line.strip()
+                if line:
+                    normalized = self.normalize_keyword(line)
+                    if normalized and normalized not in keywords:
+                        keywords.append(normalized)
+            return keywords[:k], token_usage
 
-    def extract_keyword_and_search_for_hit(self, small_model, task_text: str, threshold: Optional[str] = None) -> (str, Optional[dict], TokenUsage, dict):
+    def extract_keyword_and_search_for_hit(self, small_model, task_text: str, k: int = 1) -> (str, Optional[dict], TokenUsage, dict, list[str]):
         """
         Runs keyword extraction with the small model and does an exact-match cache lookup.
-        Returns: (keyword, cached_entry_or_None, accumulated_token_usage, latency_info)
-        - threshold is ignored for default exact-match behavior; kept for backwards compat / experiments.
+        Returns: (best_keyword, cached_entry_or_None, accumulated_token_usage, latency_info, all_keywords)
+        - k: number of keywords to extract and search for
         """
         latency_info: dict[str, float] = {}
         total_tokens = TokenUsage(0, 0)
 
         t0 = time.time()
-        kw, kw_tokens = self.extract_keyword(small_model, task_text)
+        keywords, kw_tokens = self.extract_keyword(small_model, task_text, k)
+        print(f"$$$$$ Extracted keywords: {keywords}")
         t1 = time.time()
         # accumulate tokens
         total_tokens.input_tokens += getattr(kw_tokens, "input_tokens", 0)
@@ -168,25 +189,44 @@ class AgenticPlanCache:
 
         latency_info["keyword_extraction"] = t1 - t0
 
-        # per paper: exact-match lookup on keyword
+        
         lookup_t0 = time.time()
-        entry = self.get_exact(kw) if kw else None
+        best_keyword = None
+        best_entry = None
+        
+        # Search through all keywords for a cache hit
+        for keyword in keywords:
+            if keyword:
+                entry = self.get_exact(keyword)
+                if entry is not None:
+                    best_keyword = keyword
+                    best_entry = entry
+                    break  # Use first hit found
+        
+        # If no hit found, use the first keyword as the primary one
+        if best_keyword is None and keywords:
+            best_keyword = keywords[0]
+            
         lookup_t1 = time.time()
         latency_info["cache_lookup"] = lookup_t1 - lookup_t0
 
-        return kw, copy.deepcopy(entry) if entry is not None else None, total_tokens, latency_info
+        return best_keyword, copy.deepcopy(best_entry) if best_entry is not None else None, total_tokens, latency_info, keywords
 
 
-    def induce_and_insert(self, large_model, keyword: str, conversation_trace: dict[str, Any]) -> TokenUsage:
+    def induce_and_insert(self, large_model, keywords: list[str], conversation_trace: dict[str, Any]) -> TokenUsage:
         """
         Use the large model to distill a structured, reusable plan template from a successful conversation trace.
-        - keyword: the canonical keyword under which to store the template.
+        - keywords: list of keywords under which to store the template.
         - conversation_trace: a dict containing the dialogue/trace that led to the final solution.
         Returns the token usage (TokenUsage) consumed during cache induction (to be accounted for separately).
         """
-        if not keyword:
-            keyword = "unknown"
-        key = self.normalize_keyword(keyword)
+        if not keywords:
+            keywords = ["unknown"]
+        
+        # Normalize all keywords
+        normalized_keywords = [self.normalize_keyword(kw) for kw in keywords if kw]
+        if not normalized_keywords:
+            normalized_keywords = ["unknown"]
 
         # Extract a plain plan string from the conversation trace
         plan_string = self._extract_plan_template_as_text(conversation_trace)
@@ -219,7 +259,7 @@ class AgenticPlanCache:
         except Exception:
             # fallback: build naive template
             parsed = {
-                "keyword": key,
+                "keyword": normalized_keywords[0],
                 "task": plan_string[:300],
                 "plan_template": plan_string,
             }
@@ -227,8 +267,12 @@ class AgenticPlanCache:
         # Validate basic structure and fix if needed
         parsed = self._validate_and_fix_template(parsed)
 
-        # Insert into cache under the keyword (paper: keyword-based)
-        self.insert(key, parsed)
+        # Insert into cache under all keywords 
+        for keyword in normalized_keywords:
+            # Create a copy of the template for each keyword
+            template_copy = copy.deepcopy(parsed)
+            template_copy["keyword"] = keyword
+            self.insert(keyword, template_copy)
 
         return token_usage
 
